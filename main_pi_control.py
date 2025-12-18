@@ -13,15 +13,35 @@ import os
 MODEL_PATH = 'path/to/best_ncnn_model/'
 VIDEO_SOURCE = 0 
 CONFIG_FILE_PATH = 'config.json'
+CONFIDENCE_THRESHOLD = 0.6
+
+# Camera settings
+# Manual focus settings
+ENABLE_MANUAL_FOCUS = True
+MANUAL_FOCUS_DISTANCE_CM = 300.0 # Focus distance
+FOCUS_PROP_MIN = 0.0
+FOCUS_PROP_MAX = 1023.0
+MIN_FOCUS_DISTANCE_CM = 5.0
+MAX_FOCUS_DISTANCE_CM = 200.0
+
+ENABLE_CAMERA_SETTINGS = True
+
+CAM_BRIGHTNESS = 16
+CAM_CONTRAST = 12
+CAM_SATURATION = 128
+CAM_SHARPNESS = 10
+CAM_GAIN = 20
+CAM_EXPOSURE = 1
+CAM_AUTO_EXPOSURE = False
 
 # Default configuration values
 DEFAULT_CONFIG = {
     "motor_speed": 0.2,
     "pump_detection_duration": 0.2,
-    "water_per_spray_ml": 10.0,        # Volume of water sprayed per pump activation, not measured
+    "water_per_spray_ml": 5.0, # Volume of water sprayed per pump activation, not measured
     "water_tank_capacity_ml": 200.0, # Total capacity of the water tank, not measured
     "current_water_level_ml": 200.0, # Last known water level
-    "detection_cooldown_s": 1.0,      # Time to ignore detections after a successful spray
+    "detection_cooldown_s": 1.0, # Time to ignore detections after a successful spray
     "motor_pause_on_detection_s": 1.0 # How long to pause motor when a weed is detected
 }
 
@@ -30,7 +50,7 @@ GPIO_DIR_PIN_MOTOR = 27
 GPIO_PWM_PIN_MOTOR = 13 
 GPIO_DIR_PIN_PUMP = 24 
 GPIO_PWM_PIN_PUMP = 12 
-SPEED_PUMP_DUTY_CYCLE = 0.50  # Constant power for the pump
+SPEED_PUMP_DUTY_CYCLE = 0.50 # Constant power for the pump
 
 # Flask Server Config
 HOST = '0.0.0.0' 
@@ -48,11 +68,11 @@ class WeedBotState:
         self.water_per_spray_ml = DEFAULT_CONFIG["water_per_spray_ml"]
         self.water_tank_capacity_ml = DEFAULT_CONFIG["water_tank_capacity_ml"]
         self.current_water_level_ml = DEFAULT_CONFIG["current_water_level_ml"]
-        self.water_log = [] # Stores log entries
+        self.water_log = []
         
         # Cooldown State
         self.detection_cooldown_s = DEFAULT_CONFIG["detection_cooldown_s"]
-        self.last_detection_time = 0.0 # Timestamp of the last successful spray
+        self.last_detection_time = 0.0 # Timestamp of the last successful spray activation
         
         # Frame Buffer for Video Streaming
         self.latest_annotated_frame = None
@@ -410,7 +430,7 @@ def index():
                             if(response.new_duration !== undefined) {
                                 document.getElementById('detection_duration_input').value = response.new_duration;
                             }
-                            if(response.new_cooldown !== undefined) { // NEW: Update cooldown display
+                            if(response.new_cooldown !== undefined) {
                                 currentCooldownSpan.innerText = response.new_cooldown.toFixed(1) + 's';
                                 document.getElementById('cooldown_input').value = response.new_cooldown;
                             }
@@ -463,7 +483,7 @@ def index():
             return false;
         }
 
-        // Water Management Functions
+        // Water Management Functions 
         function resetWaterLevel() {
             if (confirm('Are you sure you want to reset the water level to full capacity?')) {
                 sendCommand('/reset_water_level', {}, 'Tank level reset to full capacity.');
@@ -582,7 +602,7 @@ def handle_motor_stop():
 
 @app.route('/start_motor', methods=['POST'])
 def handle_motor_start():
-    # API endpoint to start the motor (speed default 0.2)
+    # API endpoint to start the motor
     default_start_speed = 0.2
     if set_motor_speed(default_start_speed): 
         return jsonify({
@@ -604,6 +624,7 @@ def handle_pump_test():
         
         with STATE.lock: 
             if log_water_usage(duration, 'Test'):
+                # Immediate physical activation if water is available
                 pump_dir.on()
                 pump_pwm.value = SPEED_PUMP_DUTY_CYCLE
                 STATE.pump_off_time = time.time() + duration 
@@ -614,7 +635,7 @@ def handle_pump_test():
                     'message': 'Tank is empty. Cannot run pump test.'
                 }), 400
         
-        print(f"-> Pump test activate for {duration:.1f} seconds.")
+        print(f"Pump test actiavted for {duration:.1f} seconds.")
         
         return jsonify({
             'status': 'success', 
@@ -653,7 +674,7 @@ def handle_cooldown_change():
     cooldown = data.get('cooldown', STATE.detection_cooldown_s)
     
     try:
-        # Clamp cooldown to a reasonable range
+        # Clamp cooldown
         cooldown = max(0.5, min(30.0, float(cooldown))) 
         
         with STATE.lock:
@@ -681,7 +702,7 @@ def get_status():
             'water_per_spray_ml': STATE.water_per_spray_ml,
             'water_tank_capacity_ml': STATE.water_tank_capacity_ml,
             'current_water_level_ml': STATE.current_water_level_ml,
-            'detection_cooldown_s': STATE.detection_cooldown_s, # Return cooldown
+            'detection_cooldown_s': STATE.detection_cooldown_s,
             'water_log': STATE.water_log
         }), 200
 
@@ -737,18 +758,18 @@ def activate_pump_on_detect():
     # Activates the pump if a detection is made and the robot is not on cooldown
     with STATE.lock:
         
-        # Cooldown Check
+        # Cooldown check
         if time.time() < STATE.last_detection_time + STATE.detection_cooldown_s:
             return
 
-        # Activation Check (Pump duration done AND water available)
+        # Activation check
         if time.time() > STATE.pump_off_time and STATE.current_water_level_ml > 0:
             
-            # Log usage (which performs the water level subtraction and saves config)
+            # Log usage
             if log_water_usage(STATE.pump_detection_duration, 'Auto'):
                 
                 # Physical activation and state update
-                print(f"--- OBJECT DETECTED: ACTIVATING PUMP for {STATE.pump_detection_duration:.1f}s! ---")
+                print(f"--- Object detected: Activating pump for {STATE.pump_detection_duration:.1f}s! ---")
                 pump_dir.on()
                 pump_pwm.value = SPEED_PUMP_DUTY_CYCLE
                 
@@ -791,8 +812,6 @@ def pause_motor_for(duration_s: float):
 
         # Set motor to OFF and set the logical motor speed to 0.0 (temporary)
         try:
-            # Save the previously desired speed in motor_paused_prev_speed and
-            # set the current desired speed to 0 so the rest of the system sees the motor as stopped
             STATE.motor_speed = 0.0
             motor_pwm.value = 0.0
         except Exception:
@@ -800,13 +819,11 @@ def pause_motor_for(duration_s: float):
 
         # Extend or set the paused-until timestamp
         STATE.motor_paused_until = max(STATE.motor_paused_until, now + float(duration_s))
-        print(f"-> Motor paused for {duration_s:.1f}s (will resume at {STATE.motor_paused_until:.1f}).")
+        print(f"Motor paused for {duration_s:.1f}s (will resume at {STATE.motor_paused_until:.1f}).")
 
 
 def check_and_resume_motor():
-    # If the motor was temporarily paused for spraying and the pause time has elapsed,
-    # restore the previous motor speed unless the user has changed it in the meantime.
-
+    # If the motor was temporarily paused for spraying and the pause time has elapsed, restore the previous motor speed unless the user has changed it in the meantime
     with STATE.lock:
         if STATE.motor_paused_prev_speed is not None and time.time() > STATE.motor_paused_until:
             # Only restore if the current stored speed is zero
@@ -819,14 +836,75 @@ def check_and_resume_motor():
                     motor_pwm.value = restore_speed
                 except Exception:
                     pass
-                print(f"-> Motor resumed to {restore_speed*100:.0f}% after pause.")
+                print(f"Motor resumed to {restore_speed*100:.0f}% after pause.")
 
             # Clear the pause metadata
             STATE.motor_paused_prev_speed = None
             STATE.motor_paused_until = 0.0
 
+# Disable autofocus
+def apply_manual_focus(cap):
+    if not ENABLE_MANUAL_FOCUS or cap is None:
+        return
+    try:
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+    except Exception:
+        pass
 
-# Initilization YOLO and CV2
+    try:
+        # Clamp requested distance and calculate normalized value
+        d = float(MANUAL_FOCUS_DISTANCE_CM)
+        d = max(MIN_FOCUS_DISTANCE_CM, min(MAX_FOCUS_DISTANCE_CM, d))
+        t = (d - MIN_FOCUS_DISTANCE_CM) / max(1.0, (MAX_FOCUS_DISTANCE_CM - MIN_FOCUS_DISTANCE_CM))
+
+        # Map distance to focus property
+        focus_value = FOCUS_PROP_MIN + (1.0 - t) * (FOCUS_PROP_MAX - FOCUS_PROP_MIN)
+
+        cap.set(cv2.CAP_PROP_FOCUS, float(focus_value))
+    except Exception:
+        # Ignore failures
+        pass
+
+
+def apply_camera_settings(cap):
+    # Apply set of optional camera properties to the provided VideoCapture
+    if not ENABLE_CAMERA_SETTINGS or cap is None:
+        return
+
+    # Auto exposure handling: try to toggle automatic/manual exposure first
+    try:
+        if CAM_AUTO_EXPOSURE:
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+        else:
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+    except Exception:
+        pass
+
+    # Helper to set a property if not None
+    def _set(prop, value):
+        try:
+            cap.set(prop, float(value))
+        except Exception:
+            pass
+
+    if CAM_BRIGHTNESS is not None:
+        _set(cv2.CAP_PROP_BRIGHTNESS, CAM_BRIGHTNESS)
+    if CAM_CONTRAST is not None:
+        _set(cv2.CAP_PROP_CONTRAST, CAM_CONTRAST)
+    if CAM_SATURATION is not None:
+        _set(cv2.CAP_PROP_SATURATION, CAM_SATURATION)
+    if CAM_SHARPNESS is not None:
+        try:
+            _set(cv2.CAP_PROP_SHARPNESS, CAM_SHARPNESS)
+        except Exception:
+            pass
+    if CAM_GAIN is not None:
+        _set(cv2.CAP_PROP_GAIN, CAM_GAIN)
+    if CAM_EXPOSURE is not None:
+        _set(cv2.CAP_PROP_EXPOSURE, CAM_EXPOSURE)
+
+
+# Initalization (YOLO and CV2)
 try:
     # Load the YOLO model
     try:
@@ -840,6 +918,12 @@ try:
     if not cap.isOpened():
         print(f"Error: Could not open video source {VIDEO_SOURCE}.")
         raise SystemExit
+    # Apply manual focus and camera property settings
+    try:
+        apply_manual_focus(cap)
+        apply_camera_settings(cap)
+    except Exception:
+        pass
 
     # Start the flask web server thread
     server_thread = threading.Thread(target=run_flask, daemon=True)
@@ -857,6 +941,11 @@ try:
                 cap.release()
                 time.sleep(3) 
                 cap = cv2.VideoCapture(VIDEO_SOURCE)
+                try:
+                    apply_manual_focus(cap)
+                    apply_camera_settings(cap)
+                except Exception:
+                    pass
                 continue
             
             # Perform detection
@@ -865,7 +954,15 @@ try:
             # Check detection and control
             detection_found = False
             if results and len(results) > 0 and len(results[0].boxes) > 0:
-                detection_found = True
+                # Iterate boxes and check confidence
+                for box in results[0].boxes:
+                    try:
+                        conf = float(box.conf[0].item())
+                    except Exception:
+                        conf = float(getattr(box, 'conf', 1.0))
+                    if conf >= CONFIDENCE_THRESHOLD:
+                        detection_found = True
+                        break
                 
             # Annotate frame and update buffer
             if detection_found:
@@ -873,6 +970,7 @@ try:
             else:
                 annotated_frame = frame 
                 
+            # Update the global buffer
             with STATE.lock:
                 STATE.latest_annotated_frame = annotated_frame 
                 STATE.latest_frame_time = time.time() 
